@@ -1,0 +1,10 @@
+[Unit]
+Description=Dell G15 fan curve daemon
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/local/bin/g15-fancurve
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=G15 Fan Curve
+Comment=Ajustar la curva de ventiladores del Dell G15
+Exec=/usr/local/bin/g15-fan-gui
+Terminal=false
+Type=Application
+Categories=System;Settings;

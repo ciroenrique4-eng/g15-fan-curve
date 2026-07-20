@@ -1,0 +1,14 @@
+#!/bin/sh
+# Uso: g15-fan max | off | <0-255>
+case "$1" in
+  max) V=255 ;;
+  off|"") V=0 ;;
+  *) V="$1" ;;
+esac
+for h in /sys/class/hwmon/hwmon*; do
+  [ "$(cat "$h/name" 2>/dev/null)" = "alienware_wmi" ] || continue
+  echo "$V" | tee "$h/fan1_boost" "$h/fan2_boost" >/dev/null
+  echo "fan boost = $V"
+  exit 0
+done
+echo "alienware_wmi hwmon no encontrado" >&2; exit 1

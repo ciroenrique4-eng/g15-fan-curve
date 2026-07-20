@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Daemon de curva de ventilador para Dell G15 (alienware_wmi fan_boost).
+Lee max(CPU,GPU) temp e interpola la curva del perfil de energia activo
+(/sys/firmware/acpi/platform_profile: quiet|balanced|performance) desde
+/etc/g15-fancurve.json -> boost 0-255.
+El boost es ADITIVO sobre la curva auto de Dell: seguro si el daemon muere (auto sigue de piso)."""
+import json, time, glob, os, sys
+
+CONFIG = "/etc/g15-fancurve.json"
+PROFILE = "/sys/firmware/acpi/platform_profile"
+DEFAULT = {"temps": [40, 50, 60, 70, 80, 90], "boost": [0, 0, 40, 120, 200, 255]}
+
+def find_hwmon():
+    for h in glob.glob("/sys/class/hwmon/hwmon*"):
+        try:
+            if open(os.path.join(h, "name")).read().strip() == "alienware_wmi":
+                return h
+        except OSError:
+            pass
+    return None
+
+def read_temp(h):
+    t = 0
+    for i in (1, 2):  # temp1=CPU, temp2=GPU (millidegrees)
+        try:
+            t = max(t, int(open(f"{h}/temp{i}_input").read()) // 1000)
+        except OSError:
+            pass
+    return t
+
+def read_profile():
+    try:
+        return open(PROFILE).read().strip()
+    except OSError:
+        return "balanced"
+
+def interp(t, temps, boost):
+    if t <= temps[0]:
+        return boost[0]
+    if t >= temps[-1]:
+        return boost[-1]
+    for i in range(len(temps) - 1):
+        if temps[i] <= t <= temps[i + 1]:
+            f = (t - temps[i]) / (temps[i + 1] - temps[i])
+            return round(boost[i] + f * (boost[i + 1] - boost[i]))
+    return boost[-1]
+
+def load(profile, path=CONFIG):
+    # ponytail: sin migracion del formato viejo (curva unica en la raiz); cae a DEFAULT.
+    try:
+        c = json.load(open(path))[profile]
+        assert len(c["temps"]) == len(c["boost"]) and c["temps"]
+        assert c["temps"] == sorted(c["temps"])
+        return c
+    except Exception:
+        return DEFAULT
+
+def main():
+    h = find_hwmon()
+    if not h:
+        sys.exit("alienware_wmi hwmon no encontrado")
+    last = None
+    while True:
+        c = load(read_profile())
+        b = max(0, min(255, interp(read_temp(h), c["temps"], c["boost"])))
+        if b != last:
+            for f in ("fan1_boost", "fan2_boost"):
+                try:
+                    open(f"{h}/{f}", "w").write(str(b))
+                except OSError:
+                    pass
+            last = b
+        time.sleep(2)
+
+def _test():
+    import tempfile
+    T, B = DEFAULT["temps"], DEFAULT["boost"]
+    assert interp(35, T, B) == 0      # bajo el piso
+    assert interp(40, T, B) == 0      # en el primer punto
+    assert interp(55, T, B) == 20     # interp 50(0)->60(40) al 50%
+    assert interp(60, T, B) == 40     # en un punto
+    assert interp(95, T, B) == 255    # sobre el techo
+    p = tempfile.mktemp()
+    json.dump({"quiet": {"temps": [40, 90], "boost": [1, 2]},
+               "performance": {"temps": [40, 90], "boost": [3, 4]},
+               "roto": {"temps": [90, 40], "boost": [0, 0]}}, open(p, "w"))
+    assert load("quiet", p)["boost"] == [1, 2]        # perfil pedido
+    assert load("performance", p)["boost"] == [3, 4]  # otro perfil
+    assert load("balanced", p) == DEFAULT             # perfil ausente
+    assert load("roto", p) == DEFAULT                 # temps desordenadas
+    assert load("quiet", "/no/existe") == DEFAULT     # sin config
+    os.unlink(p)
+    print("interp + load OK")
+
+if __name__ == "__main__":
+    _test() if len(sys.argv) > 1 and sys.argv[1] == "--test" else main()

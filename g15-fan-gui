@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""GUI GTK4 para editar las curvas de ventilador del Dell G15.
+Una curva por modo de energia (quiet/balanced/performance). Arrastra los puntos
+(temp fija en X, boost% en Y). Guarda en /etc/g15-fancurve.json, que el daemon
+g15-fancurve re-lee en <=2s aplicando la del modo activo. Config del usuario => sin sudo."""
+import gi, json, glob, os
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk, GLib
+
+CONFIG = "/etc/g15-fancurve.json"
+PROFILE = "/sys/firmware/acpi/platform_profile"
+PROFILES = ["quiet", "balanced", "performance"]
+DEFAULT = {"temps": [40, 50, 60, 70, 80, 90], "boost": [0, 0, 40, 120, 200, 255]}
+TMIN, TMAX, BMAX, MARGIN, HIT = 30, 100, 255, 44, 20
+
+def find_hwmon():
+    for h in glob.glob("/sys/class/hwmon/hwmon*"):
+        try:
+            if open(h + "/name").read().strip() == "alienware_wmi":
+                return h
+        except OSError:
+            pass
+    return None
+
+def active_profile():
+    try:
+        p = open(PROFILE).read().strip()
+    except OSError:
+        p = ""
+    return p if p in PROFILES else "balanced"
+
+class Curve(Gtk.DrawingArea):
+    def __init__(self, profile):
+        super().__init__()
+        self.set_content_width(580)
+        self.set_content_height(340)
+        self.set_draw_func(self.on_draw)
+        self.drag_i = None
+        self.sy = 0
+        self.cur_temp = self.cur_fan = None
+        self.set_profile(profile)
+        g = Gtk.GestureDrag()
+        g.connect("drag-begin", self.begin)
+        g.connect("drag-update", self.update)
+        g.connect("drag-end", self.end)
+        self.add_controller(g)
+
+    def set_profile(self, profile):
+        self.profile = profile
+        try:
+            c = json.load(open(CONFIG))[profile]
+            self.temps, self.boost = list(c["temps"]), list(c["boost"])
+        except Exception:
+            self.temps, self.boost = list(DEFAULT["temps"]), list(DEFAULT["boost"])
+        self.queue_draw()
+
+    def px(self, w, temp):
+        return MARGIN + (temp - TMIN) / (TMAX - TMIN) * (w - 2 * MARGIN)
+
+    def py(self, h, b):
+        return (h - MARGIN) - (b / BMAX) * (h - 2 * MARGIN)
+
+    def inv_y(self, h, y):
+        return max(0, min(BMAX, round((h - MARGIN - y) / (h - 2 * MARGIN) * BMAX)))
+
+    def begin(self, g, x, y):
+        w, h = self.get_width(), self.get_height()
+        best, bd = None, 1e9
+        for i, t in enumerate(self.temps):
+            d = (x - self.px(w, t)) ** 2 + (y - self.py(h, self.boost[i])) ** 2
+            if d < bd:
+                bd, best = d, i
+        self.drag_i = best if bd <= HIT * HIT else None
+        self.sy = y
+
+    def update(self, g, dx, dy):
+        if self.drag_i is None:
+            return
+        self.boost[self.drag_i] = self.inv_y(self.get_height(), self.sy + dy)
+        self.queue_draw()
+
+    def end(self, g, dx, dy):
+        if self.drag_i is None:
+            return
+        self.drag_i = None
+        try:  # leer-modificar-escribir: no pisar las curvas de los otros perfiles
+            all_c = json.load(open(CONFIG))
+            assert isinstance(all_c, dict)
+        except Exception:
+            all_c = {}
+        all_c[self.profile] = {"temps": self.temps, "boost": self.boost}
+        try:
+            json.dump(all_c, open(CONFIG, "w"), indent=1)
+        except OSError as e:
+            print("no se pudo guardar:", e)
+
+    def on_draw(self, area, cr, w, h):
+        cr.set_source_rgb(0.09, 0.09, 0.11)
+        cr.paint()
+        cr.set_line_width(1)
+        cr.set_font_size(11)
+        for t in range(TMIN, TMAX + 1, 10):
+            x = self.px(w, t)
+            cr.set_source_rgb(0.22, 0.22, 0.26)
+            cr.move_to(x, MARGIN); cr.line_to(x, h - MARGIN); cr.stroke()
+            cr.set_source_rgb(0.6, 0.6, 0.65)
+            cr.move_to(x - 9, h - MARGIN + 16); cr.show_text(f"{t}°")
+        for pct in range(0, 101, 25):
+            y = self.py(h, pct / 100 * BMAX)
+            cr.set_source_rgb(0.22, 0.22, 0.26)
+            cr.move_to(MARGIN, y); cr.line_to(w - MARGIN, y); cr.stroke()
+            cr.set_source_rgb(0.6, 0.6, 0.65)
+            cr.move_to(6, y + 4); cr.show_text(f"{pct}%")
+        # current temp marker
+        if self.cur_temp:
+            x = self.px(w, max(TMIN, min(TMAX, self.cur_temp)))
+            cr.set_source_rgb(1.0, 0.5, 0.2); cr.set_line_width(1.5)
+            cr.move_to(x, MARGIN); cr.line_to(x, h - MARGIN); cr.stroke()
+            cr.move_to(x + 4, MARGIN + 14); cr.show_text(f"{self.cur_temp}° / {self.cur_fan} RPM")
+        # curve
+        cr.set_source_rgb(0.3, 0.7, 1.0); cr.set_line_width(2.5)
+        for i, t in enumerate(self.temps):
+            x, y = self.px(w, t), self.py(h, self.boost[i])
+            cr.line_to(x, y) if i else cr.move_to(x, y)
+        cr.stroke()
+        for i, t in enumerate(self.temps):
+            x, y = self.px(w, t), self.py(h, self.boost[i])
+            cr.set_source_rgb(0.3, 0.7, 1.0); cr.arc(x, y, 6, 0, 6.2832); cr.fill()
+            cr.set_source_rgb(1, 1, 1); cr.set_font_size(10)
+            cr.move_to(x - 11, y - 10); cr.show_text(f"{round(self.boost[i] / BMAX * 100)}%")
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="dev.g15.fancurve")
+
+    def do_activate(self):
+        win = Gtk.ApplicationWindow(application=self, title="G15 Fan Curve")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        for s in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{s}")(12)
+        self.curve = Curve(active_profile())
+        drop = Gtk.DropDown.new_from_strings(PROFILES)
+        drop.set_selected(PROFILES.index(self.curve.profile))
+        drop.connect("notify::selected", self.on_profile)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.append(Gtk.Label(label="Modo de energía:"))
+        row.append(drop)
+        box.append(row)
+        box.append(self.curve)
+        self.status = Gtk.Label(label="…", xalign=0)
+        box.append(self.status)
+        note = Gtk.Label(xalign=0)
+        note.set_markup("<small>Arrastra los puntos (eje Y = % ventilador). Se guarda solo; el daemon aplica en ≤2s la curva del modo activo.</small>")
+        box.append(note)
+        win.set_child(box)
+        win.present()
+        self.hw = find_hwmon()
+        GLib.timeout_add_seconds(1, self.tick)
+
+    def on_profile(self, drop, _):
+        # ponytail: el dropdown manda; no sigue al modo activo para no mover la curva mientras editas.
+        self.curve.set_profile(PROFILES[drop.get_selected()])
+
+    def tick(self):
+        h = self.hw
+        if h:
+            try:
+                cpu = int(open(f"{h}/temp1_input").read()) // 1000
+                gpu = int(open(f"{h}/temp2_input").read()) // 1000
+                f1 = int(open(f"{h}/fan1_input").read())
+                f2 = int(open(f"{h}/fan2_input").read())
+                self.curve.cur_temp = max(cpu, gpu)
+                self.curve.cur_fan = max(f1, f2)
+                act = active_profile()
+                edit = "" if act == self.curve.profile else f"   (editando: {self.curve.profile})"
+                self.status.set_text(f"CPU {cpu}°   GPU {gpu}°   |   fans {f1}/{f2} RPM   |   modo activo: {act}{edit}")
+                self.curve.queue_draw()
+            except OSError:
+                pass
+        return True
+
+App().run()
