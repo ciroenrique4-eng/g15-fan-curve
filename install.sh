@@ -41,6 +41,7 @@ else
 fi
 
 systemctl daemon-reload
-systemctl enable --now g15-fancurve.service
+systemctl enable g15-fancurve.service
+systemctl restart g15-fancurve.service  # enable --now no reinicia un daemon ya corriendo: quedaba el binario viejo
 echo "Listo. Estado: $(systemctl is-active g15-fancurve.service)"
 echo "Abre la GUI con: g15-fan-gui"

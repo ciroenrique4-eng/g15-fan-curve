@@ -8,6 +8,7 @@ import json, time, glob, os, sys
 
 CONFIG = "/etc/g15-fancurve.json"
 PROFILE = "/sys/firmware/acpi/platform_profile"
+PERF = "/sys/devices/system/cpu/intel_pstate/max_perf_pct"
 DEFAULT = {"temps": [40, 50, 60, 70, 80, 90], "boost": [0, 0, 40, 120, 200, 255]}
 
 def find_hwmon():
@@ -55,6 +56,24 @@ def load(profile, path=CONFIG):
     except Exception:
         return DEFAULT
 
+def cpu_cap(path=CONFIG):
+    # tope del boost del CPU (%) en la clave raiz "cpu_max_perf"; None = no tocar
+    try:
+        v = json.load(open(path)).get("cpu_max_perf")
+    except Exception:
+        return None
+    return v if type(v) is int and 1 <= v <= 100 else None
+
+def apply_cpu_cap(v, path=PERF):
+    # tuned-ppd (perfil performance) lo resetea a 100: por eso se reaplica cada ciclo
+    if v is None or not os.path.exists(path):
+        return
+    try:
+        if int(open(path).read()) != v:
+            open(path, "w").write(str(v))
+    except OSError:
+        pass
+
 def main():
     h = find_hwmon()
     if not h:
@@ -70,6 +89,7 @@ def main():
                 except OSError:
                     pass
             last = b
+        apply_cpu_cap(cpu_cap())
         time.sleep(2)
 
 def _test():
@@ -90,7 +110,17 @@ def _test():
     assert load("roto", p) == DEFAULT                 # temps desordenadas
     assert load("quiet", "/no/existe") == DEFAULT     # sin config
     os.unlink(p)
-    print("interp + load OK")
+    p = tempfile.mktemp()
+    for v, want in [(80, 80), (0, None), (101, None), ("80", None), (True, None)]:
+        json.dump({"cpu_max_perf": v}, open(p, "w"))
+        assert cpu_cap(p) == want, v
+    assert cpu_cap("/no/existe") is None
+    os.unlink(p)
+    p = tempfile.mktemp(); open(p, "w").write("100")
+    apply_cpu_cap(80, p); assert open(p).read() == "80"
+    apply_cpu_cap(None, p); assert open(p).read() == "80"  # None = no tocar
+    os.unlink(p)
+    print("interp + load + cpu cap OK")
 
 if __name__ == "__main__":
     _test() if len(sys.argv) > 1 and sys.argv[1] == "--test" else main()

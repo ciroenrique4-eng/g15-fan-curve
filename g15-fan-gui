@@ -22,6 +22,13 @@ def find_hwmon():
             pass
     return None
 
+def read_cap():
+    try:
+        v = json.load(open(CONFIG)).get("cpu_max_perf")
+        return str(v) if type(v) is int else ""
+    except Exception:
+        return ""
+
 def active_profile():
     try:
         p = open(PROFILE).read().strip()
@@ -146,6 +153,17 @@ class App(Gtk.Application):
         row.append(Gtk.Label(label="Modo de energía:"))
         row.append(drop)
         box.append(row)
+        cap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        cap.append(Gtk.Label(label="Tope del boost del CPU (%):"))
+        self.cap_entry = Gtk.Entry(width_chars=4, max_width_chars=4)
+        self.cap_entry.set_text(read_cap())
+        self.cap_entry.connect("activate", self.on_cap)
+        fc = Gtk.EventControllerFocus()
+        fc.connect("leave", self.on_cap)
+        self.cap_entry.add_controller(fc)
+        cap.append(self.cap_entry)
+        cap.append(Gtk.Label(label="vacío = sin tope"))
+        box.append(cap)
         box.append(self.curve)
         self.status = Gtk.Label(label="…", xalign=0)
         box.append(self.status)
@@ -156,6 +174,26 @@ class App(Gtk.Application):
         win.present()
         self.hw = find_hwmon()
         GLib.timeout_add_seconds(1, self.tick)
+
+    def on_cap(self, *_):
+        t = self.cap_entry.get_text().strip()
+        if t and not (t.isdigit() and 1 <= int(t) <= 100):
+            self.cap_entry.set_text(read_cap())  # inválido: vuelve al valor guardado
+            return
+        try:  # leer-modificar-escribir; si no se puede leer, no pisar las curvas
+            all_c = json.load(open(CONFIG))
+            assert isinstance(all_c, dict)
+        except Exception:
+            print("no se pudo leer", CONFIG, "; no guardo el tope")
+            return
+        if t:
+            all_c["cpu_max_perf"] = int(t)
+        else:
+            all_c.pop("cpu_max_perf", None)
+        try:
+            json.dump(all_c, open(CONFIG, "w"), indent=1)
+        except OSError as e:
+            print("no se pudo guardar:", e)
 
     def on_profile(self, drop, _):
         # ponytail: el dropdown manda; no sigue al modo activo para no mover la curva mientras editas.

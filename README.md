@@ -105,6 +105,13 @@ sudo systemctl stop g15-fancurve   # si no, el daemon lo sobrescribe en 2s
 sudo g15-fan max                   # o: off, o un valor 0-255
 ```
 
+## Tope del boost del CPU (opcional)
+
+En la GUI, el campo **Tope del boost del CPU (%)** escribe la clave raíz `"cpu_max_perf"` de
+`/etc/g15-fancurve.json` (1-100; vacío = sin tope). El daemon la reaplica cada 2 s en
+`intel_pstate/max_perf_pct`, porque el perfil `performance` de `tuned-ppd` lo resetea a 100.
+Sin la clave, el daemon no toca ese valor.
+
 ## Verificar / depurar
 
 ```sh
